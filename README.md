@@ -34,6 +34,9 @@ Application Options:
   -4                              use tcp4 only
   -6                              use tcp6 only
       --verify-ssl                verify SSL certificate
+  -k, --ignore-ssl-error          ignore SSL/TLS errors: skip certificate
+                                  verification and allow legacy TLS versions,
+                                  cipher suites and key exchanges
   -v, --version                   Show version
 
 Help Options:
@@ -47,6 +50,21 @@ check with HEAD request
 ```
 % ./check_http2 -S  -I blog.nomadscafe.jp -H blog.nomadscafe.jp -u /2016/03/retty-tech-cafe-5.html -e 'HTTP/1.0 200,HTTP/1.1 200,HTTP/2.0 200' -j HEAD --sni
 HTTP OK: Status line output "HTTP/2.0 200 OK" matched "HTTP/2.0 200"  - 482 bytes in 0.349 second response time | time=0.349428s;;;0.000000 size=482B;;;0
+```
+
+ignore SSL/TLS errors
+
+Certificate verification is disabled by default; `--verify-ssl` turns it on.
+`-k` / `--ignore-ssl-error` states that insecure behaviour explicitly and cannot be
+combined with `--verify-ssl`. It also relaxes the handshake itself, which is what a
+server-side `remote error: tls: handshake failure` needs: legacy TLS versions
+(down to 1.0), every cipher suite this build implements, and only the classic key
+exchanges, because the post-quantum key share sent by default makes some servers
+and middleboxes abort the handshake.
+
+```
+% ./check_http2 -S -I 192.0.2.10 -H legacy.example.com --sni -k
+HTTP OK: Status line output "HTTP/1.1 200 OK" matched "HTTP/1.,HTTP/2."  - 1234 bytes in 0.031 second response time | time=0.031000s;;;0.000000 size=1234B;;;0
 ```
 
 wait for success

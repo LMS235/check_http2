@@ -132,3 +132,17 @@ func TestVerifyIPAddressFallback(t *testing.T) {
 		t.Fatalf("Hostname = %q, want %q", opt.Hostname, "192.0.2.1")
 	}
 }
+
+func TestVerifyBothSSLVerifyModes(t *testing.T) {
+	opt := Opt{Hostname: "example.com", SSL: true, VerifySSL: true, IgnoreSSLError: true}
+	if err := opt.verify(); err == nil {
+		t.Fatal("verify() error = nil, want error")
+	}
+}
+
+func TestVerifyIgnoreSSLError(t *testing.T) {
+	opt := Opt{Hostname: "example.com", SSL: true, IgnoreSSLError: true}
+	if err := opt.verify(); err != nil {
+		t.Fatalf("verify() error = %v", err)
+	}
+}

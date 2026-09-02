@@ -54,6 +54,7 @@ type Opt struct {
 	TCP4                bool          `short:"4" description:"use tcp4 only"`
 	TCP6                bool          `short:"6" description:"use tcp6 only"`
 	VerifySSL           bool          `long:"verify-ssl" description:"verify SSL certificate"`
+	IgnoreSSLError      bool          `short:"k" long:"ignore-ssl-error" description:"ignore SSL/TLS errors: skip certificate verification and allow legacy TLS versions, cipher suites and key exchanges"`
 	Version             bool          `short:"v" long:"version" description:"Show version"`
 	bufferSize          uint64
 	expectByte          []byte
@@ -70,6 +71,66 @@ func (e *RequestError) Error() string {
 
 func (e *RequestError) Code() int {
 	return e.code
+}
+
+// allCipherSuiteIDs returns every cipher suite this Go runtime implements,
+// including the ones it does not offer by default because they are insecure.
+func allCipherSuiteIDs() []uint16 {
+	secure := tls.CipherSuites()
+	insecure := tls.InsecureCipherSuites()
+	ids := make([]uint16, 0, len(secure)+len(insecure))
+	for _, s := range secure {
+		ids = append(ids, s.ID)
+	}
+	for _, s := range insecure {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+func (opt *Opt) MakeTLSConfig() *tls.Config {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: opt.IgnoreSSLError || !opt.VerifySSL,
+	}
+
+	if opt.IgnoreSSLError {
+		// A server-side "remote error: tls: handshake failure" is not a certificate
+		// problem, so skipping verification alone does not help. Offer the legacy
+		// TLS versions and cipher suites such endpoints are stuck on, and only the
+		// classic curves, because the post-quantum key share Go sends by default
+		// makes some servers and middleboxes abort the handshake.
+		tlsConfig.MinVersion = tls.VersionTLS10
+		tlsConfig.CipherSuites = allCipherSuiteIDs()
+		tlsConfig.CurvePreferences = []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+			tls.CurveP384,
+			tls.CurveP521,
+		}
+	}
+
+	if opt.SNI {
+		host, _, err := net.SplitHostPort(opt.Hostname)
+		if err != nil {
+			host = opt.Hostname
+		}
+		tlsConfig.ServerName = host
+	}
+
+	switch opt.TLSMaxVersion {
+	case "1.0":
+		tlsConfig.MinVersion = tls.VersionTLS10
+		tlsConfig.MaxVersion = tls.VersionTLS10
+	case "1.1":
+		tlsConfig.MinVersion = tls.VersionTLS11
+		tlsConfig.MaxVersion = tls.VersionTLS11
+	case "1.2":
+		tlsConfig.MaxVersion = tls.VersionTLS12
+	case "1.3":
+		tlsConfig.MaxVersion = tls.VersionTLS13
+	}
+
+	return tlsConfig
 }
 
 func (opt *Opt) MakeTransport() http.RoundTripper {
@@ -90,32 +151,6 @@ func (opt *Opt) MakeTransport() http.RoundTripper {
 		return baseDialFunc(ctx, tcpMode, addr)
 	}
 
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: !opt.VerifySSL,
-	}
-	if opt.SNI {
-		host, _, err := net.SplitHostPort(opt.Hostname)
-		if err != nil {
-			host = opt.Hostname
-		}
-		tlsConfig.ServerName = host
-	}
-
-	if opt.TLSMaxVersion != "" {
-		switch opt.TLSMaxVersion {
-		case "1.0":
-			tlsConfig.MinVersion = tls.VersionTLS10
-			tlsConfig.MaxVersion = tls.VersionTLS10
-		case "1.1":
-			tlsConfig.MinVersion = tls.VersionTLS11
-			tlsConfig.MaxVersion = tls.VersionTLS11
-		case "1.2":
-			tlsConfig.MaxVersion = tls.VersionTLS12
-		case "1.3":
-			tlsConfig.MaxVersion = tls.VersionTLS13
-		}
-	}
-
 	return &http.Transport{
 		// inherited http.DefaultTransport
 		Proxy:                 http.ProxyFromEnvironment,
@@ -125,7 +160,7 @@ func (opt *Opt) MakeTransport() http.RoundTripper {
 		ExpectContinueTimeout: 1 * time.Second,
 		// self-customized values
 		ResponseHeaderTimeout: opt.Timeout,
-		TLSClientConfig:       tlsConfig,
+		TLSClientConfig:       opt.MakeTLSConfig(),
 		ForceAttemptHTTP2:     true,
 	}
 }
