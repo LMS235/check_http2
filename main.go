@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -150,6 +151,66 @@ func (opt *Opt) verifyExpect() error {
 	return fmt.Errorf("expect holds no status to match: %q", opt.Expect)
 }
 
+// warn notes something the operator should know but that is not reason enough to
+// refuse the check.
+func (opt *Opt) warn(format string, args ...any) {
+	opt.warnings = append(opt.warnings, fmt.Sprintf(format, args...))
+}
+
+// verifyAuthorization resolves the credentials, reading them from a file when
+// one is given so they need not appear in the process list.
+func (opt *Opt) verifyAuthorization() error {
+	if opt.Authorization != "" && opt.AuthorizationFile != "" {
+		return fmt.Errorf("both authorization and authorization-file are specified")
+	}
+
+	if opt.AuthorizationFile != "" {
+		if err := opt.readAuthorizationFile(); err != nil {
+			return err
+		}
+	}
+
+	if opt.Authorization == "" {
+		return nil
+	}
+
+	if !strings.Contains(opt.Authorization, ":") {
+		return fmt.Errorf("invalid authorization args")
+	}
+
+	if !opt.SSL {
+		opt.warn("sending basic authentication over plain http, credentials go out unencrypted: add -S")
+	}
+
+	return nil
+}
+
+func (opt *Opt) readAuthorizationFile() error {
+	info, err := os.Stat(opt.AuthorizationFile)
+	if err != nil {
+		return fmt.Errorf("failed to read authorization-file: %w", err)
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		opt.warn("authorization-file %s is accessible to more than its owner (mode %#o)", opt.AuthorizationFile, mode)
+	}
+
+	data, err := os.ReadFile(opt.AuthorizationFile)
+	if err != nil {
+		return fmt.Errorf("failed to read authorization-file: %w", err)
+	}
+
+	// The credentials are the first line; only the line ending is stripped, so a
+	// password may hold spaces.
+	line, _, _ := strings.Cut(string(data), "\n")
+	opt.Authorization = strings.TrimRight(line, "\r")
+
+	if opt.Authorization == "" {
+		return fmt.Errorf("authorization-file %s holds no credentials", opt.AuthorizationFile)
+	}
+
+	return nil
+}
+
 func (opt *Opt) verifySSLOptions() error {
 	if opt.VerifySSL && opt.IgnoreSSLError {
 		return fmt.Errorf("both verify-ssl and ignore-ssl-error are specified")
@@ -240,6 +301,10 @@ func (opt *Opt) verify() error {
 	}
 
 	if err := opt.verifySSLOptions(); err != nil {
+		return err
+	}
+
+	if err := opt.verifyAuthorization(); err != nil {
 		return err
 	}
 
@@ -338,6 +403,9 @@ func _main() int {
 	if err := opt.verify(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return UNKNOWN
+	}
+	for _, w := range opt.warnings {
+		log.Printf("warning: %s", w)
 	}
 	return opt.run()
 }

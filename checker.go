@@ -48,7 +48,8 @@ type Opt struct {
 	ExpectContent       string        `short:"s" long:"string" description:"String to expect in the content"`
 	Base64ExpectContent string        `long:"base64-string" description:"Base64 Encoded string to expect the content"`
 	UserAgent           string        `short:"A" long:"useragent" default:"check_http" description:"UserAgent to be sent"`
-	Authorization       string        `short:"a" long:"authorization" description:"username:password on sites with basic authentication"`
+	Authorization       string        `short:"a" long:"authorization" description:"username:password on sites with basic authentication (visible in the process list; prefer authorization-file)"`
+	AuthorizationFile   string        `long:"authorization-file" description:"file holding username:password, read instead of passing it on the command line"`
 	SSL                 bool          `short:"S" long:"ssl" description:"use https"`
 	SNI                 bool          `long:"sni" description:"require a hostname for SNI (SNI is always sent for a hostname)"`
 	TLSMaxVersion       string        `long:"tls-max" description:"maximum supported TLS version" choice:"1.0" choice:"1.1" choice:"1.2" choice:"1.3"`
@@ -59,6 +60,7 @@ type Opt struct {
 	Version             bool          `short:"v" long:"version" description:"Show version"`
 	bufferSize          uint64
 	expectByte          []byte
+	warnings            []string
 }
 
 type RequestError struct {
