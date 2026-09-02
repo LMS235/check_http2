@@ -1,8 +1,13 @@
 package main
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVerifyBufferSize(t *testing.T) {
@@ -209,4 +214,119 @@ func setVersionGlobals(t *testing.T, v, c string) {
 		version, commit = origVersion, origCommit
 	})
 	version, commit = v, c
+}
+
+// the deadline has to cover every request the run is configured to make
+func TestRunTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  Opt
+		want time.Duration
+	}{
+		{"single request", Opt{Timeout: 10 * time.Second, Consecutive: 1, Interim: time.Second}, 13 * time.Second},
+		{"consecutive requests", Opt{Timeout: 10 * time.Second, Consecutive: 3, Interim: time.Second}, 35 * time.Second},
+		{"consecutive unset", Opt{Timeout: 10 * time.Second, Interim: time.Second}, 13 * time.Second},
+		{"wait-for-max wins", Opt{Timeout: 10 * time.Second, Consecutive: 3, Interim: time.Second, WaitForMax: 20 * time.Second}, 20 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.opt.runTimeout(); got != tt.want {
+				t.Fatalf("runTimeout() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// a run of consecutive successes must not be cut off by the deadline
+func TestRunConsecutiveSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+
+	host, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("Atoi() error = %v", err)
+	}
+
+	opt := Opt{
+		Hostname: "example.com", IPAddress: host, Port: p,
+		Method: "GET", URI: "/", UserAgent: "check_http", Expect: "HTTP/1.,HTTP/2.",
+		Timeout: time.Second, Consecutive: 4, Interim: 300 * time.Millisecond,
+	}
+	if err := opt.verify(); err != nil {
+		t.Fatalf("verify() error = %v", err)
+	}
+
+	if code := opt.run(); code != OK {
+		t.Fatalf("run() = %d, want %d (every request succeeded)", code, OK)
+	}
+}
+
+func TestVerifyPort(t *testing.T) {
+	tests := []struct {
+		name     string
+		opt      Opt
+		wantErr  bool
+		wantPort int
+	}{
+		{"port from hostname", Opt{Hostname: "example.com:8080"}, false, 8080},
+		{"non-numeric port in hostname", Opt{Hostname: "example.com:http"}, true, 0},
+		{"port out of range in hostname", Opt{Hostname: "example.com:99999"}, true, 0},
+		{"explicit port out of range", Opt{Hostname: "example.com", Port: 70000}, true, 0},
+		{"explicit negative port", Opt{Hostname: "example.com", Port: -1}, true, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.opt.verify()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("verify() error = nil, want error (port resolved to %d)", tt.opt.Port)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify() error = %v", err)
+			}
+			if tt.opt.Port != tt.wantPort {
+				t.Fatalf("Port = %d, want %d", tt.opt.Port, tt.wantPort)
+			}
+		})
+	}
+}
+
+func TestVerifyExpect(t *testing.T) {
+	tests := []struct {
+		name    string
+		expect  string
+		wantErr bool
+	}{
+		{"empty disables the check", "", false},
+		{"normal list", "HTTP/1.,HTTP/2.", false},
+		{"list with spaces", "HTTP/1.1 200, HTTP/2.0 200", false},
+		{"only separators", ",", true},
+		{"only whitespace", " , ", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt := Opt{Hostname: "example.com", Expect: tt.expect}
+			err := opt.verify()
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("verify() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// an absurd --consecutive must not wrap the deadline into the past
+func TestRunTimeoutDoesNotOverflow(t *testing.T) {
+	opt := Opt{Timeout: 10 * time.Second, Interim: time.Second, Consecutive: 1 << 40}
+	if got := opt.runTimeout(); got <= 0 {
+		t.Fatalf("runTimeout() = %v, want a positive duration", got)
+	}
 }

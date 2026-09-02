@@ -8,33 +8,36 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 )
 
-func TestExpectedStatusCodeMatched(t *testing.T) {
-	opt := Opt{Expect: "HTTP/1.1 200,HTTP/2.0 200"}
-
-	got := opt.ExpectedStatusCode("HTTP/2.0 200 OK")
-	if got != "HTTP/2.0 200" {
-		t.Fatalf("expectedStatusCode() = %q, want %q", got, "HTTP/2.0 200")
+func TestExpectedStatusCode(t *testing.T) {
+	tests := []struct {
+		name      string
+		expect    string
+		status    string
+		want      string
+		wantMatch bool
+	}{
+		{"matched", "HTTP/1.1 200,HTTP/2.0 200", "HTTP/2.0 200 OK", "HTTP/2.0 200", true},
+		{"no match", "HTTP/1.1 200,HTTP/2.0 200", "HTTP/1.1 500 Internal Server Error", "", false},
+		{"first match wins", "HTTP/,HTTP/2.0 200", "HTTP/2.0 200 OK", "HTTP/", true},
+		// an empty pattern would match anything, so it must not be reported as a match
+		{"leading comma", ",HTTP/1.1 200", "HTTP/1.1 200 OK", "HTTP/1.1 200", true},
+		{"trailing comma", "HTTP/1.1 200,", "HTTP/1.1 500 Internal Server Error", "", false},
+		// a list written with spaces is what a human types
+		{"space after comma", "HTTP/1.1 200, HTTP/2.0 200", "HTTP/2.0 200 OK", "HTTP/2.0 200", true},
 	}
-}
 
-func TestExpectedStatusCodeNoMatch(t *testing.T) {
-	opt := Opt{Expect: "HTTP/1.1 200,HTTP/2.0 200"}
-
-	got := opt.ExpectedStatusCode("HTTP/1.1 500 Internal Server Error")
-	if got != "" {
-		t.Fatalf("expectedStatusCode() = %q, want empty", got)
-	}
-}
-
-func TestExpectedStatusCodeReturnsFirstMatch(t *testing.T) {
-	opt := Opt{Expect: "HTTP/,HTTP/2.0 200"}
-
-	got := opt.ExpectedStatusCode("HTTP/2.0 200 OK")
-	if got != "HTTP/" {
-		t.Fatalf("expectedStatusCode() = %q, want %q", got, "HTTP/")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt := Opt{Expect: tt.expect}
+			got, ok := opt.ExpectedStatusCode(tt.status)
+			if got != tt.want || ok != tt.wantMatch {
+				t.Fatalf("ExpectedStatusCode(%q) = (%q, %v), want (%q, %v)", tt.status, got, ok, tt.want, tt.wantMatch)
+			}
+		})
 	}
 }
 
@@ -128,19 +131,17 @@ func getTransport(opt *Opt) (*http.Transport, error) {
 	return transport, nil
 }
 
-// MakeTransport tests
-func TestMakeTransport(t *testing.T) {
-	opt := Opt{
-		SSL:      true,
-		SNI:      true,
-		Hostname: "example.com:443",
-	}
+// a proxy cannot be reached through a dialer that ignores the address, so the
+// transport must not be configured for one
+func TestMakeTransportHasNoProxy(t *testing.T) {
+	opt := Opt{SSL: true, Hostname: "example.com"}
+
 	transport, err := getTransport(&opt)
 	if err != nil {
 		t.Fatalf("MakeTransport() error = %v", err)
 	}
-	if transport.TLSClientConfig.ServerName != "example.com" {
-		t.Fatalf("MakeTransport() TLSClientConfig.ServerName = %q, want %q", transport.TLSClientConfig.ServerName, "example.com")
+	if transport.Proxy != nil {
+		t.Fatal("MakeTransport() Transport.Proxy is set, want nil")
 	}
 }
 
@@ -190,8 +191,8 @@ func TestMakeTransportWithTLSMaxVersion(t *testing.T) {
 	}
 }
 
-// MakeTransport tests with VerifySSL false
-func TestMakeTransportWithVerifySSLFalse(t *testing.T) {
+// certificates are verified unless that is explicitly waived
+func TestMakeTransportVerifiesByDefault(t *testing.T) {
 	opt := Opt{
 		SSL: true,
 	}
@@ -200,8 +201,8 @@ func TestMakeTransportWithVerifySSLFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MakeTransport() error = %v", err)
 	}
-	if transport.TLSClientConfig.InsecureSkipVerify != true {
-		t.Fatalf("MakeTransport() TLSClientConfig.InsecureSkipVerify = %v, want %v", transport.TLSClientConfig.InsecureSkipVerify, true)
+	if transport.TLSClientConfig.InsecureSkipVerify != false {
+		t.Fatalf("MakeTransport() TLSClientConfig.InsecureSkipVerify = %v, want %v", transport.TLSClientConfig.InsecureSkipVerify, false)
 	}
 }
 
@@ -299,9 +300,14 @@ func TestRequestSelfSignedCertificate(t *testing.T) {
 	defer srv.Close()
 
 	opt := optForServer(t, srv)
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr == nil {
+		t.Fatal("Request() with no flags error = nil, want certificate error")
+	}
+
+	opt = optForServer(t, srv)
 	opt.VerifySSL = true
 	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr == nil {
-		t.Fatal("Request() error = nil, want certificate error")
+		t.Fatal("Request() with --verify-ssl error = nil, want certificate error")
 	}
 
 	opt = optForServer(t, srv)
@@ -324,13 +330,175 @@ func TestRequestLegacyTLSServer(t *testing.T) {
 	defer srv.Close()
 
 	opt := optForServer(t, srv)
-	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr == nil {
+	_, rErr := opt.Request(context.Background(), opt.BuildClient())
+	if rErr == nil {
 		t.Fatal("Request() error = nil, want handshake error")
+	}
+	if !strings.Contains(rErr.Error(), "protocol version") {
+		t.Fatalf("Request() error = %v, want it to fail on the protocol version", rErr)
 	}
 
 	opt = optForServer(t, srv)
 	opt.IgnoreSSLError = true
 	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr != nil {
 		t.Fatalf("Request() error = %v, want nil", rErr)
+	}
+}
+
+func serverOpt(t *testing.T, srv *httptest.Server, hostname string) *Opt {
+	t.Helper()
+	host, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("Atoi() error = %v", err)
+	}
+	return &Opt{
+		Hostname:  hostname,
+		IPAddress: host,
+		Port:      p,
+		Method:    "GET",
+		URI:       "/",
+		UserAgent: "check_http",
+		Expect:    "HTTP/1.,HTTP/2.",
+	}
+}
+
+// proxy environment variables must not reach the transport: they used to break
+// https outright and silently un-proxy plain http
+func TestRequestIgnoresProxyEnvironment(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://192.0.2.1:3128")
+	t.Setenv("HTTPS_PROXY", "http://192.0.2.1:3128")
+
+	var gotRequestURI string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+	}))
+	defer plain.Close()
+
+	opt := serverOpt(t, plain, "example.com")
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr != nil {
+		t.Fatalf("Request() error = %v, want nil", rErr)
+	}
+	if gotRequestURI != "/" {
+		t.Fatalf("request-target = %q, want %q (proxy form means the proxy config leaked in)", gotRequestURI, "/")
+	}
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer tlsSrv.Close()
+
+	tlsOpt := serverOpt(t, tlsSrv, "example.com")
+	tlsOpt.SSL = true
+	tlsOpt.IgnoreSSLError = true // the test server certificate is self-signed
+	if _, rErr := tlsOpt.Request(context.Background(), tlsOpt.BuildClient()); rErr != nil {
+		t.Fatalf("Request() over https error = %v, want nil", rErr)
+	}
+}
+
+// the Host header carries the port whenever it is not the scheme default
+func TestRequestHost(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostname string
+		port     int
+		ssl      bool
+		want     string
+	}{
+		{"default http port omitted", "example.com", 80, false, "example.com"},
+		{"default https port omitted", "example.com", 443, true, "example.com"},
+		{"custom port added", "example.com", 8443, true, "example.com:8443"},
+		{"port already in hostname kept", "example.com:8080", 8080, false, "example.com:8080"},
+		{"ipv6 literal bracketed", "::1", 80, false, "[::1]"},
+		{"ipv6 literal with custom port", "::1", 8080, false, "[::1]:8080"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt := Opt{Hostname: tt.hostname, Port: tt.port, SSL: tt.ssl, Method: "GET", URI: "/", UserAgent: "check_http"}
+			if got := opt.requestHost(); got != tt.want {
+				t.Fatalf("requestHost() = %q, want %q", got, tt.want)
+			}
+
+			req, err := opt.BuildRequest(context.Background())
+			if err != nil {
+				t.Fatalf("BuildRequest() error = %v", err)
+			}
+			if req.Host != "" && req.Host != tt.want {
+				t.Fatalf("BuildRequest() Host = %q, want %q", req.Host, tt.want)
+			}
+			if req.URL.Host != tt.want {
+				t.Fatalf("BuildRequest() URL.Host = %q, want %q", req.URL.Host, tt.want)
+			}
+		})
+	}
+}
+
+// what the target actually receives
+func TestRequestSendsHostHeaderWithPort(t *testing.T) {
+	var gotHost string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+	}))
+	defer srv.Close()
+
+	opt := serverOpt(t, srv, "example.com")
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr != nil {
+		t.Fatalf("Request() error = %v", rErr)
+	}
+	want := "example.com:" + strconv.Itoa(opt.Port)
+	if gotHost != want {
+		t.Fatalf("Host header = %q, want %q", gotHost, want)
+	}
+}
+
+// SNI is sent for a hostname whether or not --sni was passed
+func TestRequestAlwaysSendsSNI(t *testing.T) {
+	for _, sni := range []bool{false, true} {
+		var got string
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+		srv.TLS = &tls.Config{GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+			got = chi.ServerName
+			return nil, nil
+		}}
+		srv.StartTLS()
+
+		opt := serverOpt(t, srv, "localhost")
+		opt.SSL = true
+		opt.SNI = sni
+		opt.IgnoreSSLError = true // the test server certificate is self-signed
+		if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr != nil {
+			t.Fatalf("Request() with sni=%v error = %v", sni, rErr)
+		}
+		srv.Close()
+
+		if got != "localhost" {
+			t.Fatalf("server saw SNI %q with sni=%v, want %q", got, sni, "localhost")
+		}
+	}
+}
+
+// the body is searched as it streams, so a match past max-buffer-size counts
+func TestRequestMatchesBeyondBufferSize(t *testing.T) {
+	body := append([]byte(strings.Repeat("a", 1000)), []byte("NEEDLE")...)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	opt := serverOpt(t, srv, "example.com")
+	opt.ExpectContent = "NEEDLE"
+	opt.MaxBufferSize = HumanBytes(50)
+	if err := opt.verify(); err != nil {
+		t.Fatalf("verify() error = %v", err)
+	}
+
+	msg, rErr := opt.Request(context.Background(), opt.BuildClient())
+	if rErr != nil {
+		t.Fatalf("Request() error = %v, want the match to be found beyond the cap", rErr)
+	}
+	if !strings.Contains(msg, "Response body matched") {
+		t.Fatalf("Request() msg = %q, want it to report the body match", msg)
 	}
 }

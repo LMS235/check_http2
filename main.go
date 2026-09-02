@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -135,6 +136,20 @@ func (opt *Opt) verifyExpectedContent() error {
 	return nil
 }
 
+func (opt *Opt) verifyExpect() error {
+	if opt.Expect == "" {
+		return nil
+	}
+
+	for e := range strings.SplitSeq(opt.Expect, ",") {
+		if strings.TrimSpace(e) != "" {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("expect holds no status to match: %q", opt.Expect)
+}
+
 func (opt *Opt) verifySSLOptions() error {
 	if opt.VerifySSL && opt.IgnoreSSLError {
 		return fmt.Errorf("both verify-ssl and ignore-ssl-error are specified")
@@ -173,23 +188,34 @@ func (opt *Opt) normalizeHostAndIP() {
 	}
 }
 
-func (opt *Opt) setDefaultPort() {
+// defaultPort is the port for the scheme when none was given.
+func defaultPort(ssl bool) int {
+	if ssl {
+		return 443
+	}
+	return 80
+}
+
+func (opt *Opt) setDefaultPort() error {
 	if opt.Port == 0 {
-		_, port, err := net.SplitHostPort(opt.Hostname)
-		if err == nil {
-			p, _ := strconv.Atoi(port)
-			// skip error check OK
+		if _, port, err := net.SplitHostPort(opt.Hostname); err == nil {
+			p, err := strconv.Atoi(port)
+			if err != nil {
+				return fmt.Errorf("invalid port %q in hostname %q", port, opt.Hostname)
+			}
 			opt.Port = p
 		}
 	}
 
 	if opt.Port == 0 {
-		if opt.SSL {
-			opt.Port = 443
-		} else {
-			opt.Port = 80
-		}
+		opt.Port = defaultPort(opt.SSL)
 	}
+
+	if opt.Port < 1 || opt.Port > 65535 {
+		return fmt.Errorf("port %d is out of range", opt.Port)
+	}
+
+	return nil
 }
 
 func (opt *Opt) setDefaultURI() {
@@ -209,6 +235,10 @@ func (opt *Opt) verify() error {
 		return err
 	}
 
+	if err := opt.verifyExpect(); err != nil {
+		return err
+	}
+
 	if err := opt.verifySSLOptions(); err != nil {
 		return err
 	}
@@ -218,7 +248,11 @@ func (opt *Opt) verify() error {
 	}
 
 	opt.normalizeHostAndIP()
-	opt.setDefaultPort()
+
+	if err := opt.setDefaultPort(); err != nil {
+		return err
+	}
+
 	opt.setDefaultURI()
 
 	return nil
@@ -236,15 +270,32 @@ func (opt *Opt) BuildClient() *http.Client {
 	return client
 }
 
+// runTimeout is the deadline for the whole run: every request it is asked to
+// make plus the interim waits between them, and the slack the single-request
+// case has always had.
+func (opt *Opt) runTimeout() time.Duration {
+	if opt.WaitForMax > 0 {
+		return opt.WaitForMax
+	}
+
+	requests := max(opt.Consecutive, 1)
+
+	const slack = 3 * time.Second
+	total := slack + time.Duration(requests)*opt.Timeout + time.Duration(requests-1)*opt.Interim
+	if total < slack {
+		// an absurd --consecutive overflowed the duration; no deadline is a
+		// better answer than one that has already passed
+		return math.MaxInt64
+	}
+
+	return total
+}
+
 func (opt *Opt) run() int {
 	client := opt.BuildClient()
 
 	ctx := context.Background()
-	timeout := opt.Timeout + 3*time.Second
-	if opt.WaitForMax > 0 {
-		timeout = opt.WaitForMax
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, opt.runTimeout())
 	defer cancel()
 
 	if opt.WaitFor {
