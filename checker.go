@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ type Opt struct {
 	UserAgent           string        `short:"A" long:"useragent" default:"check_http" description:"UserAgent to be sent"`
 	Authorization       string        `short:"a" long:"authorization" description:"username:password on sites with basic authentication"`
 	SSL                 bool          `short:"S" long:"ssl" description:"use https"`
-	SNI                 bool          `long:"sni" description:"enable SNI"`
+	SNI                 bool          `long:"sni" description:"require a hostname for SNI (SNI is always sent for a hostname)"`
 	TLSMaxVersion       string        `long:"tls-max" description:"maximum supported TLS version" choice:"1.0" choice:"1.1" choice:"1.2" choice:"1.3"`
 	TCP4                bool          `short:"4" description:"use tcp4 only"`
 	TCP6                bool          `short:"6" description:"use tcp6 only"`
@@ -109,14 +110,6 @@ func (opt *Opt) MakeTLSConfig() *tls.Config {
 		}
 	}
 
-	if opt.SNI {
-		host, _, err := net.SplitHostPort(opt.Hostname)
-		if err != nil {
-			host = opt.Hostname
-		}
-		tlsConfig.ServerName = host
-	}
-
 	switch opt.TLSMaxVersion {
 	case "1.0":
 		tlsConfig.MinVersion = tls.VersionTLS10
@@ -153,7 +146,11 @@ func (opt *Opt) MakeTransport() http.RoundTripper {
 
 	return &http.Transport{
 		// inherited http.DefaultTransport
-		Proxy:                 http.ProxyFromEnvironment,
+		//
+		// Proxy is deliberately left unset: dialFunc always connects to the
+		// address given by the options, so a proxy from the environment would
+		// never be reached, while the transport would still format requests for
+		// one - breaking https outright and silently un-proxying plain http.
 		DialContext:           dialFunc,
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   opt.Timeout,
@@ -165,13 +162,36 @@ func (opt *Opt) MakeTransport() http.RoundTripper {
 	}
 }
 
+// requestHost returns the host for the request URL, and so for the Host header:
+// the hostname plus the port whenever that port is not the scheme default, as
+// check_http sends it.
+func (opt *Opt) requestHost() string {
+	host, port, err := net.SplitHostPort(opt.Hostname)
+	if err != nil {
+		host, port = opt.Hostname, ""
+	}
+
+	if port == "" && opt.Port != 0 && opt.Port != defaultPort(opt.SSL) {
+		port = strconv.Itoa(opt.Port)
+	}
+
+	if port != "" {
+		return net.JoinHostPort(host, port)
+	}
+	if strings.Contains(host, ":") {
+		// bare IPv6 literal, which a URL needs in brackets
+		return "[" + host + "]"
+	}
+	return host
+}
+
 func (opt *Opt) BuildRequest(ctx context.Context) (*http.Request, error) {
 	schema := "http"
 	if opt.SSL {
 		schema = "https"
 	}
 
-	uri := fmt.Sprintf("%s://%s%s", schema, opt.Hostname, opt.URI)
+	uri := fmt.Sprintf("%s://%s%s", schema, opt.requestHost(), opt.URI)
 	var b bytes.Buffer
 	req, err := http.NewRequestWithContext(
 		ctx,
@@ -193,14 +213,21 @@ func (opt *Opt) BuildRequest(ctx context.Context) (*http.Request, error) {
 	return req, nil
 }
 
-func (opt *Opt) ExpectedStatusCode(status string) string {
+// ExpectedStatusCode reports the first expected status the status line starts
+// with. An empty pattern matches everything, so it is skipped rather than
+// reported as a match of "".
+func (opt *Opt) ExpectedStatusCode(status string) (string, bool) {
 	expects := strings.SplitSeq(opt.Expect, ",")
 	for e := range expects {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
 		if strings.HasPrefix(status, e) {
-			return e
+			return e, true
 		}
 	}
-	return ""
+	return "", false
 }
 
 func (opt *Opt) Request(ctx context.Context, client *http.Client) (string, *RequestError) {
@@ -225,6 +252,7 @@ func (opt *Opt) Request(ctx context.Context, client *http.Client) (string, *Requ
 	b := &CapWriter{
 		Cap:       opt.bufferSize,
 		NoDiscard: opt.NoDiscard,
+		Needle:    opt.expectByte,
 	}
 	defer res.Body.Close()
 	_, err = io.Copy(b, res.Body)
@@ -240,19 +268,19 @@ func (opt *Opt) Request(ctx context.Context, client *http.Client) (string, *Requ
 
 	statusLine := fmt.Sprintf("%s %s", res.Proto, res.Status)
 	if opt.Expect != "" {
-		m := opt.ExpectedStatusCode(statusLine)
-		if m == "" {
+		m, ok := opt.ExpectedStatusCode(statusLine)
+		if !ok {
 			return "", &RequestError{
 				fmt.Sprintf("HTTP CRITICAL - Invalid HTTP response received from host on port %d: %s", opt.Port, statusLine),
 				CRITICAL,
 			}
 		} else {
-			matched = append(matched, fmt.Sprintf(`Status line output "%s" matched "%s"`, statusLine, opt.Expect))
+			matched = append(matched, fmt.Sprintf(`Status line output "%s" matched "%s"`, statusLine, m))
 		}
 	}
 
 	if len(opt.expectByte) > 0 {
-		if !bytes.Contains(b.Bytes(), opt.expectByte) {
+		if !b.Found() {
 			return "", &RequestError{
 				fmt.Sprintf(`HTTP CRITICAL - HTTP response body Not matched %q from host on port %d`, string(opt.expectByte), opt.Port),
 				CRITICAL,
@@ -262,6 +290,9 @@ func (opt *Opt) Request(ctx context.Context, client *http.Client) (string, *Requ
 		}
 	}
 
+	// Count the status line and headers towards the reported size, as check_http
+	// does. This has to stay after the body match above: b also scans what is
+	// written to it, and a needle in a header is not a body match.
 	_, _ = b.Write([]byte(statusLine + "\r\n\r\n"))
 	_ = res.Header.Write(b)
 
