@@ -99,7 +99,7 @@ func versionInfo() (string, string) {
 	}
 
 	if v == "" {
-		v = "devel"
+		v = defaultVersion
 	}
 	if c == "" {
 		c = "unknown"

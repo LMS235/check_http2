@@ -191,8 +191,8 @@ func TestVersionInfoWithoutLDFlags(t *testing.T) {
 	setVersionGlobals(t, "", "")
 
 	v, c := versionInfo()
-	if v == "" || v == versionSuffix {
-		t.Fatalf("versionInfo() version = %q, want a placeholder before the suffix", v)
+	if v != defaultVersion+versionSuffix {
+		t.Fatalf("versionInfo() version = %q, want %q", v, defaultVersion+versionSuffix)
 	}
 	if !strings.HasSuffix(v, versionSuffix) {
 		t.Fatalf("versionInfo() version = %q, want suffix %q", v, versionSuffix)
