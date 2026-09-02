@@ -54,7 +54,7 @@ type Opt struct {
 	TLSMaxVersion       string        `long:"tls-max" description:"maximum supported TLS version" choice:"1.0" choice:"1.1" choice:"1.2" choice:"1.3"`
 	TCP4                bool          `short:"4" description:"use tcp4 only"`
 	TCP6                bool          `short:"6" description:"use tcp6 only"`
-	VerifySSL           bool          `long:"verify-ssl" description:"verify SSL certificate"`
+	VerifySSL           bool          `long:"verify-ssl" description:"verify SSL certificate (the default; kept for compatibility)"`
 	IgnoreSSLError      bool          `short:"k" long:"ignore-ssl-error" description:"ignore SSL/TLS errors: skip certificate verification and allow legacy TLS versions, cipher suites and key exchanges"`
 	Version             bool          `short:"v" long:"version" description:"Show version"`
 	bufferSize          uint64
@@ -91,7 +91,9 @@ func allCipherSuiteIDs() []uint16 {
 
 func (opt *Opt) MakeTLSConfig() *tls.Config {
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: opt.IgnoreSSLError || !opt.VerifySSL,
+		// Certificates are verified unless that is explicitly waived: a check
+		// that accepts any certificate cannot report a broken chain.
+		InsecureSkipVerify: opt.IgnoreSSLError,
 	}
 
 	if opt.IgnoreSSLError {

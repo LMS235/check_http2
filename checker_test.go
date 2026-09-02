@@ -191,8 +191,8 @@ func TestMakeTransportWithTLSMaxVersion(t *testing.T) {
 	}
 }
 
-// MakeTransport tests with VerifySSL false
-func TestMakeTransportWithVerifySSLFalse(t *testing.T) {
+// certificates are verified unless that is explicitly waived
+func TestMakeTransportVerifiesByDefault(t *testing.T) {
 	opt := Opt{
 		SSL: true,
 	}
@@ -201,8 +201,8 @@ func TestMakeTransportWithVerifySSLFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MakeTransport() error = %v", err)
 	}
-	if transport.TLSClientConfig.InsecureSkipVerify != true {
-		t.Fatalf("MakeTransport() TLSClientConfig.InsecureSkipVerify = %v, want %v", transport.TLSClientConfig.InsecureSkipVerify, true)
+	if transport.TLSClientConfig.InsecureSkipVerify != false {
+		t.Fatalf("MakeTransport() TLSClientConfig.InsecureSkipVerify = %v, want %v", transport.TLSClientConfig.InsecureSkipVerify, false)
 	}
 }
 
@@ -300,9 +300,14 @@ func TestRequestSelfSignedCertificate(t *testing.T) {
 	defer srv.Close()
 
 	opt := optForServer(t, srv)
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr == nil {
+		t.Fatal("Request() with no flags error = nil, want certificate error")
+	}
+
+	opt = optForServer(t, srv)
 	opt.VerifySSL = true
 	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr == nil {
-		t.Fatal("Request() error = nil, want certificate error")
+		t.Fatal("Request() with --verify-ssl error = nil, want certificate error")
 	}
 
 	opt = optForServer(t, srv)
@@ -325,8 +330,12 @@ func TestRequestLegacyTLSServer(t *testing.T) {
 	defer srv.Close()
 
 	opt := optForServer(t, srv)
-	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr == nil {
+	_, rErr := opt.Request(context.Background(), opt.BuildClient())
+	if rErr == nil {
 		t.Fatal("Request() error = nil, want handshake error")
+	}
+	if !strings.Contains(rErr.Error(), "protocol version") {
+		t.Fatalf("Request() error = %v, want it to fail on the protocol version", rErr)
 	}
 
 	opt = optForServer(t, srv)
@@ -382,6 +391,7 @@ func TestRequestIgnoresProxyEnvironment(t *testing.T) {
 
 	tlsOpt := serverOpt(t, tlsSrv, "example.com")
 	tlsOpt.SSL = true
+	tlsOpt.IgnoreSSLError = true // the test server certificate is self-signed
 	if _, rErr := tlsOpt.Request(context.Background(), tlsOpt.BuildClient()); rErr != nil {
 		t.Fatalf("Request() over https error = %v, want nil", rErr)
 	}
@@ -457,6 +467,7 @@ func TestRequestAlwaysSendsSNI(t *testing.T) {
 		opt := serverOpt(t, srv, "localhost")
 		opt.SSL = true
 		opt.SNI = sni
+		opt.IgnoreSSLError = true // the test server certificate is self-signed
 		if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr != nil {
 			t.Fatalf("Request() with sni=%v error = %v", sni, rErr)
 		}

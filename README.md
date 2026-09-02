@@ -34,7 +34,8 @@ Application Options:
       --tls-max=[1.0|1.1|1.2|1.3] maximum supported TLS version
   -4                              use tcp4 only
   -6                              use tcp6 only
-      --verify-ssl                verify SSL certificate
+      --verify-ssl                verify SSL certificate (the default; kept for
+                                  compatibility)
   -k, --ignore-ssl-error          ignore SSL/TLS errors: skip certificate
                                   verification and allow legacy TLS versions,
                                   cipher suites and key exchanges
@@ -55,17 +56,22 @@ HTTP OK: Status line output "HTTP/2.0 200 OK" matched "HTTP/2.0 200"  - 482 byte
 
 ignore SSL/TLS errors
 
-Certificate verification is disabled by default; `--verify-ssl` turns it on.
-`-k` / `--ignore-ssl-error` states that insecure behaviour explicitly and cannot be
-combined with `--verify-ssl`. It also relaxes the handshake itself, which is what a
+Certificates are verified by default, so an expired, self-signed or wrong-host
+certificate makes the check fail. `--verify-ssl` is therefore a no-op, kept so
+existing command lines keep working.
+
+`-k` / `--ignore-ssl-error` waives that, and cannot be combined with
+`--verify-ssl`. It also relaxes the handshake itself, which is what a
 server-side `remote error: tls: handshake failure` needs: legacy TLS versions
 (down to 1.0), every cipher suite this build implements, and only the classic key
 exchanges, because the post-quantum key share sent by default makes some servers
-and middleboxes abort the handshake.
+and middleboxes abort the handshake. Both parts are insecure by intent — reach
+for it when checking an endpoint whose TLS you knowingly cannot fix, not as a
+habit.
 
 ```
 % ./check_http2 -S -I 192.0.2.10 -H legacy.example.com --sni -k
-HTTP OK: Status line output "HTTP/1.1 200 OK" matched "HTTP/1.,HTTP/2."  - 1234 bytes in 0.031 second response time | time=0.031000s;;;0.000000 size=1234B;;;0
+HTTP OK: Status line output "HTTP/1.1 200 OK" matched "HTTP/1."  - 1234 bytes in 0.031 second response time | time=0.031000s;;;0.000000 size=1234B;;;0
 ```
 
 ## Notes
