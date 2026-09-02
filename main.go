@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jessevdk/go-flags"
@@ -24,6 +26,84 @@ const (
 	CRITICAL
 	UNKNOWN
 )
+
+// cleanModuleVersion turns the module version recorded in the binary into a
+// version worth displaying, or "" when it says no more than the revision does.
+func cleanModuleVersion(moduleVersion, revision string) string {
+	v := strings.TrimPrefix(moduleVersion, "v")
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		// drop build metadata such as "+dirty" or "+incompatible"
+		v = v[:i]
+	}
+
+	if v == "(devel)" {
+		return ""
+	}
+
+	// For a build from a checkout the go tool derives a pseudo-version ending in
+	// the revision, which is reported on its own anyway.
+	if len(revision) >= 12 && strings.Contains(v, revision[:12]) {
+		return ""
+	}
+
+	return v
+}
+
+// buildInfoVersion reports the version and revision the go tool recorded in the
+// binary, which is what is available when building without the ldflags the
+// Makefile passes.
+func buildInfoVersion() (string, string) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", ""
+	}
+
+	var revision string
+	var modified bool
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+
+	v := cleanModuleVersion(info.Main.Version, revision)
+
+	if len(revision) > 7 {
+		revision = revision[:7]
+	}
+	if revision != "" && modified {
+		revision += "-dirty"
+	}
+
+	return v, revision
+}
+
+// versionInfo returns the version and revision to display, preferring the values
+// stamped in via ldflags and falling back to what the go tool embedded.
+func versionInfo() (string, string) {
+	v, c := version, commit
+	if v == "" || c == "" {
+		infoVersion, infoCommit := buildInfoVersion()
+		if v == "" {
+			v = infoVersion
+		}
+		if c == "" {
+			c = infoCommit
+		}
+	}
+
+	if v == "" {
+		v = "devel"
+	}
+	if c == "" {
+		c = "unknown"
+	}
+
+	return v, c
+}
 
 func (opt *Opt) verifyWaitFor() error {
 	if opt.WaitFor && opt.WaitForMax == 0 {
@@ -184,17 +264,15 @@ func _main() int {
 	psr := flags.NewParser(opt, flags.HelpFlag|flags.PassDoubleDash)
 	_, err := psr.Parse()
 	if opt.Version {
-		if commit == "" {
-			commit = "dev"
-		}
+		v, c := versionInfo()
 		fmt.Printf(
 			"%s-%s\n%s/%s, %s, %s\n",
 			filepath.Base(os.Args[0]),
-			version,
+			v,
 			runtime.GOOS,
 			runtime.GOARCH,
 			runtime.Version(),
-			commit)
+			c)
 		return OK
 	} else if flags.WroteHelp(err) {
 		fmt.Fprintf(os.Stdout, "%v\n", err)

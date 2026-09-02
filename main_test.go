@@ -146,3 +146,61 @@ func TestVerifyIgnoreSSLError(t *testing.T) {
 		t.Fatalf("verify() error = %v", err)
 	}
 }
+
+func TestCleanModuleVersion(t *testing.T) {
+	tests := []struct {
+		name          string
+		moduleVersion string
+		revision      string
+		want          string
+	}{
+		{"released version", "v0.0.25", "", "0.0.25"},
+		{"prerelease version", "v1.0.0-rc1", "", "1.0.0-rc1"},
+		{"build metadata dropped", "v0.0.25+incompatible", "", "0.0.25"},
+		{"devel", "(devel)", "8cb1db2901f17b704945fa8f3de7ebfe37d3d8ad", ""},
+		{"pseudo version", "v0.0.0-20260902164506-8cb1db2901f1+dirty", "8cb1db2901f17b704945fa8f3de7ebfe37d3d8ad", ""},
+		{"empty", "", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cleanModuleVersion(tt.moduleVersion, tt.revision); got != tt.want {
+				t.Fatalf("cleanModuleVersion(%q, %q) = %q, want %q", tt.moduleVersion, tt.revision, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVersionInfoFromLDFlags(t *testing.T) {
+	setVersionGlobals(t, "0.0.25", "abcdef1")
+
+	v, c := versionInfo()
+	if v != "0.0.25" {
+		t.Fatalf("versionInfo() version = %q, want %q", v, "0.0.25")
+	}
+	if c != "abcdef1" {
+		t.Fatalf("versionInfo() commit = %q, want %q", c, "abcdef1")
+	}
+}
+
+// without ldflags the output must still be readable, never an empty version
+func TestVersionInfoWithoutLDFlags(t *testing.T) {
+	setVersionGlobals(t, "", "")
+
+	v, c := versionInfo()
+	if v == "" {
+		t.Fatal("versionInfo() version is empty, want a placeholder")
+	}
+	if c == "" {
+		t.Fatal("versionInfo() commit is empty, want a placeholder")
+	}
+}
+
+func setVersionGlobals(t *testing.T, v, c string) {
+	t.Helper()
+	origVersion, origCommit := version, commit
+	t.Cleanup(func() {
+		version, commit = origVersion, origCommit
+	})
+	version, commit = v, c
+}
