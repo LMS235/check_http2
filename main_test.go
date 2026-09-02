@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -328,5 +331,169 @@ func TestRunTimeoutDoesNotOverflow(t *testing.T) {
 	opt := Opt{Timeout: 10 * time.Second, Interim: time.Second, Consecutive: 1 << 40}
 	if got := opt.runTimeout(); got <= 0 {
 		t.Fatalf("runTimeout() = %v, want a positive duration", got)
+	}
+}
+
+func writeAuthFile(t *testing.T, content string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "auth")
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
+}
+
+func TestVerifyAuthorizationFile(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		mode        os.FileMode
+		wantCreds   string
+		wantWarning bool
+	}{
+		{"plain", "user:pass", 0o600, "user:pass", false},
+		{"trailing newline", "user:pass\n", 0o600, "user:pass", false},
+		{"crlf", "user:pass\r\n", 0o600, "user:pass", false},
+		{"further lines ignored", "user:pass\nsecond\n", 0o600, "user:pass", false},
+		// only the line ending is stripped, so a password may hold spaces
+		{"password with spaces", "user:pa ss \n", 0o600, "user:pa ss ", false},
+		{"group readable warns", "user:pass\n", 0o640, "user:pass", true},
+		{"world readable warns", "user:pass\n", 0o644, "user:pass", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt := Opt{Hostname: "example.com", SSL: true, AuthorizationFile: writeAuthFile(t, tt.content, tt.mode)}
+			if err := opt.verify(); err != nil {
+				t.Fatalf("verify() error = %v", err)
+			}
+			if opt.Authorization != tt.wantCreds {
+				t.Fatalf("Authorization = %q, want %q", opt.Authorization, tt.wantCreds)
+			}
+
+			var warned bool
+			for _, w := range opt.warnings {
+				if strings.Contains(w, "accessible to more than its owner") {
+					warned = true
+				}
+			}
+			if warned != tt.wantWarning {
+				t.Fatalf("permission warning = %v, want %v (warnings: %v)", warned, tt.wantWarning, opt.warnings)
+			}
+		})
+	}
+}
+
+func TestVerifyAuthorizationErrors(t *testing.T) {
+	t.Run("both sources", func(t *testing.T) {
+		opt := Opt{Hostname: "example.com", Authorization: "user:pass", AuthorizationFile: writeAuthFile(t, "user:pass", 0o600)}
+		if err := opt.verify(); err == nil {
+			t.Fatal("verify() error = nil, want error")
+		}
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		opt := Opt{Hostname: "example.com", AuthorizationFile: filepath.Join(t.TempDir(), "absent")}
+		if err := opt.verify(); err == nil {
+			t.Fatal("verify() error = nil, want error")
+		}
+	})
+
+	t.Run("empty file", func(t *testing.T) {
+		opt := Opt{Hostname: "example.com", AuthorizationFile: writeAuthFile(t, "\n", 0o600)}
+		if err := opt.verify(); err == nil {
+			t.Fatal("verify() error = nil, want error")
+		}
+	})
+
+	t.Run("no colon in file", func(t *testing.T) {
+		opt := Opt{Hostname: "example.com", AuthorizationFile: writeAuthFile(t, "userpass\n", 0o600)}
+		if err := opt.verify(); err == nil {
+			t.Fatal("verify() error = nil, want error")
+		}
+	})
+
+	t.Run("no colon on command line", func(t *testing.T) {
+		opt := Opt{Hostname: "example.com", Authorization: "userpass"}
+		if err := opt.verify(); err == nil {
+			t.Fatal("verify() error = nil, want error")
+		}
+	})
+}
+
+// credentials over plain http are warned about, but not refused
+func TestVerifyAuthorizationOverPlainHTTP(t *testing.T) {
+	tests := []struct {
+		name     string
+		ssl      bool
+		wantWarn bool
+	}{
+		{"plain http warns", false, true},
+		{"https is quiet", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt := Opt{Hostname: "example.com", SSL: tt.ssl, Authorization: "user:pass"}
+			if err := opt.verify(); err != nil {
+				t.Fatalf("verify() error = %v", err)
+			}
+
+			var warned bool
+			for _, w := range opt.warnings {
+				if strings.Contains(w, "plain http") {
+					warned = true
+				}
+			}
+			if warned != tt.wantWarn {
+				t.Fatalf("plain http warning = %v, want %v (warnings: %v)", warned, tt.wantWarn, opt.warnings)
+			}
+		})
+	}
+}
+
+// no credentials, no warnings
+func TestVerifyWithoutAuthorizationIsQuiet(t *testing.T) {
+	opt := Opt{Hostname: "example.com"}
+	if err := opt.verify(); err != nil {
+		t.Fatalf("verify() error = %v", err)
+	}
+	if len(opt.warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", opt.warnings)
+	}
+}
+
+// the credentials from the file reach the server
+func TestRequestSendsCredentialsFromFile(t *testing.T) {
+	var gotUser, gotPass string
+	var gotOK bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUser, gotPass, gotOK = r.BasicAuth()
+	}))
+	defer srv.Close()
+
+	host, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("Atoi() error = %v", err)
+	}
+
+	opt := Opt{
+		Hostname: "example.com", IPAddress: host, Port: p,
+		Method: "GET", URI: "/", UserAgent: "check_http", Expect: "HTTP/1.,HTTP/2.",
+		AuthorizationFile: writeAuthFile(t, "monitor:s3cr3t\n", 0o600),
+	}
+	if err := opt.verify(); err != nil {
+		t.Fatalf("verify() error = %v", err)
+	}
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr != nil {
+		t.Fatalf("Request() error = %v", rErr)
+	}
+
+	if !gotOK || gotUser != "monitor" || gotPass != "s3cr3t" {
+		t.Fatalf("server saw BasicAuth(%q, %q, %v), want (%q, %q, true)", gotUser, gotPass, gotOK, "monitor", "s3cr3t")
 	}
 }

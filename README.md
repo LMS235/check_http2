@@ -27,7 +27,11 @@ Application Options:
   -s, --string=                   String to expect in the content
       --base64-string=            Base64 Encoded string to expect the content
   -A, --useragent=                UserAgent to be sent (default: check_http)
-  -a, --authorization=            username:password on sites with basic authentication
+  -a, --authorization=            username:password on sites with basic
+                                  authentication (visible in the process list;
+                                  prefer authorization-file)
+      --authorization-file=       file holding username:password, read instead
+                                  of passing it on the command line
   -S, --ssl                       use https
       --sni                       require a hostname for SNI (SNI is always
                                   sent for a hostname)
@@ -73,6 +77,38 @@ habit.
 % ./check_http2 -S -I 192.0.2.10 -H legacy.example.com --sni -k
 HTTP OK: Status line output "HTTP/1.1 200 OK" matched "HTTP/1."  - 1234 bytes in 0.031 second response time | time=0.031000s;;;0.000000 size=1234B;;;0
 ```
+
+basic authentication without exposing the credentials
+
+`-a` puts the credentials in the process list, where any local user can read
+them with `ps`, and they end up in the monitoring configuration and the shell
+history. `--authorization-file` reads them from a file instead; the two cannot
+be combined.
+
+The file holds `username:password` on its first line and nothing else.
+`/etc/nagios/check_http2.auth`:
+
+```
+monitor:s3cr3t
+```
+
+No key, no quotes, no comments: the first line is taken verbatim, so a leading
+`#` would become part of the username. Only the line ending is stripped (`\n`
+or `\r\n`), which means a password may contain spaces. Any further lines are
+ignored.
+
+Create it readable by the monitoring user alone, then point the check at it:
+
+```
+% install -m 600 /dev/null /etc/nagios/check_http2.auth
+% printf 'monitor:s3cr3t\n' > /etc/nagios/check_http2.auth
+% ./check_http2 -S -H example.com --authorization-file /etc/nagios/check_http2.auth
+```
+
+A missing file, an empty one, or a line without a colon fails the check with
+UNKNOWN before any request is sent. Two things are pointed out on stderr
+without failing the check: a file that is accessible to more than its owner,
+and credentials sent over plain `http`, where they go out unencrypted.
 
 ## Notes
 
