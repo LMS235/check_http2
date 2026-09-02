@@ -10,9 +10,17 @@ jobs:
         permissions:
             issues: write
             pull-requests: write
-            contents: write
+            contents: read
             checks: write
-        if: ${{ github.event.sender.type != 'Bot' }}
+        # The issue_comment trigger runs in the base repository with this token
+        # and the secrets below, so a comment must not be able to start an agent
+        # that acts on attacker-controlled text: only comments on pull requests,
+        # and only from someone who already has write access.
+        if: >-
+            ${{ github.event.sender.type != 'Bot'
+            && (github.event_name != 'issue_comment'
+            || (github.event.issue.pull_request
+            && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))) }}
         steps:
             - name: PR Agent action step
               uses: the-pr-agent/pr-agent@743f52d80f3513193dfc7626f778c73478df6d0a # v0.41.1
