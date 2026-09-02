@@ -20,6 +20,9 @@ import (
 var version string
 var commit string
 
+// versionSuffix marks builds of this fork, whatever the version comes from.
+const versionSuffix = "-lms235"
+
 const (
 	OK = iota
 	WARNING
@@ -102,7 +105,7 @@ func versionInfo() (string, string) {
 		c = "unknown"
 	}
 
-	return v, c
+	return v + versionSuffix, c
 }
 
 func (opt *Opt) verifyWaitFor() error {

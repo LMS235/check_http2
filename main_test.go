@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestVerifyBufferSize(t *testing.T) {
 	opt := Opt{Hostname: "example.com", MaxBufferSize: HumanBytes(2048)}
@@ -175,8 +178,8 @@ func TestVersionInfoFromLDFlags(t *testing.T) {
 	setVersionGlobals(t, "0.0.25", "abcdef1")
 
 	v, c := versionInfo()
-	if v != "0.0.25" {
-		t.Fatalf("versionInfo() version = %q, want %q", v, "0.0.25")
+	if v != "0.0.25"+versionSuffix {
+		t.Fatalf("versionInfo() version = %q, want %q", v, "0.0.25"+versionSuffix)
 	}
 	if c != "abcdef1" {
 		t.Fatalf("versionInfo() commit = %q, want %q", c, "abcdef1")
@@ -188,8 +191,11 @@ func TestVersionInfoWithoutLDFlags(t *testing.T) {
 	setVersionGlobals(t, "", "")
 
 	v, c := versionInfo()
-	if v == "" {
-		t.Fatal("versionInfo() version is empty, want a placeholder")
+	if v == "" || v == versionSuffix {
+		t.Fatalf("versionInfo() version = %q, want a placeholder before the suffix", v)
+	}
+	if !strings.HasSuffix(v, versionSuffix) {
+		t.Fatalf("versionInfo() version = %q, want suffix %q", v, versionSuffix)
 	}
 	if c == "" {
 		t.Fatal("versionInfo() commit is empty, want a placeholder")
