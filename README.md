@@ -85,16 +85,30 @@ them with `ps`, and they end up in the monitoring configuration and the shell
 history. `--authorization-file` reads them from a file instead; the two cannot
 be combined.
 
+The file holds `username:password` on its first line and nothing else.
+`/etc/nagios/check_http2.auth`:
+
+```
+monitor:s3cr3t
+```
+
+No key, no quotes, no comments: the first line is taken verbatim, so a leading
+`#` would become part of the username. Only the line ending is stripped (`\n`
+or `\r\n`), which means a password may contain spaces. Any further lines are
+ignored.
+
+Create it readable by the monitoring user alone, then point the check at it:
+
 ```
 % install -m 600 /dev/null /etc/nagios/check_http2.auth
 % printf 'monitor:s3cr3t\n' > /etc/nagios/check_http2.auth
 % ./check_http2 -S -H example.com --authorization-file /etc/nagios/check_http2.auth
 ```
 
-The credentials are the first line of the file; only the line ending is
-stripped, so a password may contain spaces. Two things are pointed out on
-stderr without failing the check: a file that is accessible to more than its
-owner, and credentials sent over plain `http`, where they go out unencrypted.
+A missing file, an empty one, or a line without a colon fails the check with
+UNKNOWN before any request is sent. Two things are pointed out on stderr
+without failing the check: a file that is accessible to more than its owner,
+and credentials sent over plain `http`, where they go out unencrypted.
 
 ## Notes
 
