@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -215,5 +218,119 @@ func TestMakeTransportWithVerifySSLTrue(t *testing.T) {
 	}
 	if transport.TLSClientConfig.InsecureSkipVerify != false {
 		t.Fatalf("MakeTransport() TLSClientConfig.InsecureSkipVerify = %v, want %v", transport.TLSClientConfig.InsecureSkipVerify, false)
+	}
+}
+
+// MakeTransport tests with IgnoreSSLError true
+func TestMakeTransportWithIgnoreSSLError(t *testing.T) {
+	opt := Opt{
+		SSL:            true,
+		IgnoreSSLError: true,
+	}
+
+	transport, err := getTransport(&opt)
+	if err != nil {
+		t.Fatalf("MakeTransport() error = %v", err)
+	}
+	tlsConfig := transport.TLSClientConfig
+	if tlsConfig.InsecureSkipVerify != true {
+		t.Fatalf("MakeTransport() TLSClientConfig.InsecureSkipVerify = %v, want %v", tlsConfig.InsecureSkipVerify, true)
+	}
+	if tlsConfig.MinVersion != tls.VersionTLS10 {
+		t.Fatalf("MakeTransport() TLSClientConfig.MinVersion = %d, want %d", tlsConfig.MinVersion, tls.VersionTLS10)
+	}
+	if len(tlsConfig.CipherSuites) != len(tls.CipherSuites())+len(tls.InsecureCipherSuites()) {
+		t.Fatalf("MakeTransport() TLSClientConfig.CipherSuites = %d suites, want all %d", len(tlsConfig.CipherSuites), len(tls.CipherSuites())+len(tls.InsecureCipherSuites()))
+	}
+	for _, curve := range tlsConfig.CurvePreferences {
+		if curve == tls.X25519MLKEM768 {
+			t.Fatal("MakeTransport() TLSClientConfig.CurvePreferences contains X25519MLKEM768, want it disabled")
+		}
+	}
+}
+
+// IgnoreSSLError with an explicit --tls-max keeps the requested version window
+func TestMakeTransportIgnoreSSLErrorWithTLSMaxVersion(t *testing.T) {
+	opt := Opt{
+		SSL:            true,
+		IgnoreSSLError: true,
+		TLSMaxVersion:  "1.1",
+	}
+
+	transport, err := getTransport(&opt)
+	if err != nil {
+		t.Fatalf("MakeTransport() error = %v", err)
+	}
+	if transport.TLSClientConfig.MaxVersion != tls.VersionTLS11 {
+		t.Fatalf("MakeTransport() TLSClientConfig.MaxVersion = %d, want %d", transport.TLSClientConfig.MaxVersion, tls.VersionTLS11)
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS11 {
+		t.Fatalf("MakeTransport() TLSClientConfig.MinVersion = %d, want %d", transport.TLSClientConfig.MinVersion, tls.VersionTLS11)
+	}
+}
+
+func optForServer(t *testing.T, srv *httptest.Server) *Opt {
+	t.Helper()
+	host, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("Atoi() error = %v", err)
+	}
+	return &Opt{
+		Hostname:  srv.Listener.Addr().String(),
+		IPAddress: host,
+		Port:      p,
+		SSL:       true,
+		Method:    "GET",
+		URI:       "/",
+		UserAgent: "check_http",
+		Expect:    "HTTP/1.,HTTP/2.",
+	}
+}
+
+// an untrusted certificate fails with --verify-ssl and is ignored with --ignore-ssl-error
+func TestRequestSelfSignedCertificate(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	opt := optForServer(t, srv)
+	opt.VerifySSL = true
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr == nil {
+		t.Fatal("Request() error = nil, want certificate error")
+	}
+
+	opt = optForServer(t, srv)
+	opt.IgnoreSSLError = true
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr != nil {
+		t.Fatalf("Request() error = %v, want nil", rErr)
+	}
+}
+
+// a server that only speaks legacy TLS rejects the handshake unless --ignore-ssl-error is set
+func TestRequestLegacyTLSServer(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS10,
+		MaxVersion: tls.VersionTLS11,
+	}
+	srv.StartTLS()
+	defer srv.Close()
+
+	opt := optForServer(t, srv)
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr == nil {
+		t.Fatal("Request() error = nil, want handshake error")
+	}
+
+	opt = optForServer(t, srv)
+	opt.IgnoreSSLError = true
+	if _, rErr := opt.Request(context.Background(), opt.BuildClient()); rErr != nil {
+		t.Fatalf("Request() error = %v, want nil", rErr)
 	}
 }

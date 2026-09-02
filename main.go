@@ -52,6 +52,13 @@ func (opt *Opt) verifyExpectedContent() error {
 	return nil
 }
 
+func (opt *Opt) verifySSLOptions() error {
+	if opt.VerifySSL && opt.IgnoreSSLError {
+		return fmt.Errorf("both verify-ssl and ignore-ssl-error are specified")
+	}
+	return nil
+}
+
 func (opt *Opt) verifyHostOptions() error {
 	if opt.TCP4 && opt.TCP6 {
 		return fmt.Errorf("both tcp4 and tcp6 are specified")
@@ -116,6 +123,10 @@ func (opt *Opt) verify() error {
 	}
 
 	if err := opt.verifyExpectedContent(); err != nil {
+		return err
+	}
+
+	if err := opt.verifySSLOptions(); err != nil {
 		return err
 	}
 
